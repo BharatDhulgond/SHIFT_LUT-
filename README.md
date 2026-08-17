@@ -217,7 +217,7 @@ Relative to an FP32 baseline:
 @inproceedings{shiftlut_softmax,
   title     = {A Hardware-Efficient Online Softmax Engine for FlashAttention
                using Base-2 Shift-LUT Exponentiation},
-  author    = {},
+  author    = {Bharat Kumar, Harshit Krishna, Prof. Madhav Rao},
   booktitle = {},
   year      = {}
 }
