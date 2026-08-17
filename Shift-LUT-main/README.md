@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![RTL: SystemVerilog](https://img.shields.io/badge/RTL-SystemVerilog-blue.svg)]()
-[![FPGA: Spartan--7](https://img.shields.io/badge/FPGA-Spartan--7-orange.svg)]()
+[![FPGA: Spartan--7](https://img.shields.io/badge/FPGA-Spartan--7-orange.svg)]() 
 [![ASIC: UMC 65nm](https://img.shields.io/badge/ASIC-UMC%2065nm-green.svg)]()
 
 RTL, verification, FPGA, and ASIC implementation of a fully pipelined online-softmax engine that replaces iterative exponentiation with an exact Base-2 decomposition: a 32-entry ROM lookup and a barrel shift.
