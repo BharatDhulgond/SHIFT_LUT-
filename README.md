@@ -1,321 +1,197 @@
 # A Hardware-Efficient Online Softmax Engine for FlashAttention using Base-2 Shift-LUT Exponentiation
 
-> Hardware-efficient implementation of the Online Softmax recurrence for FlashAttention using a novel Base-2 Shift-LUT exponentiation engine.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![RTL: SystemVerilog](https://img.shields.io/badge/RTL-SystemVerilog-blue.svg)]()
+[![FPGA: Spartan--7](https://img.shields.io/badge/FPGA-Spartan--7-orange.svg)]()
+[![ASIC: UMC 65nm](https://img.shields.io/badge/ASIC-UMC%2065nm-green.svg)]()
+
+RTL, verification, FPGA, and ASIC implementation of a fully pipelined online-softmax engine that replaces iterative exponentiation with an exact Base-2 decomposition: a 32-entry ROM lookup and a barrel shift.
+
+> **Paper:** *A Hardware-Efficient Online Softmax Engine for FlashAttention using Base-2 Shift-LUT Exponentiation*
 
 ---
 
-## Overview
+## Table of Contents
 
-This repository contains the complete RTL, Python evaluation framework, FPGA implementation, and ASIC implementation flow accompanying our paper:
-
-> **A Hardware-Efficient Online Softmax Engine for FlashAttention using Base-2 Shift-LUT Exponentiation**
-
-Unlike conventional implementations that compute the exponential using iterative algorithms such as **CORDIC**, this work exploits the bounded exponent range of FlashAttention's online softmax formulation to replace iterative exponentiation with:
-
-- Base-2 logarithmic decomposition
-- Small ROM lookup
-- Exact barrel shifting
-
-resulting in significantly lower hardware cost while maintaining model accuracy.
-
-The repository contains:
-
-- RTL implementation
-- FPGA implementation (Vivado)
-- ASIC synthesis & P&R flow (Cadence Genus + Innovus)
-- Python golden model
-- End-to-end GPT-2 evaluation
-- CORDIC baseline implementation
-- Verification infrastructure
+- [Motivation](#motivation)
+- [Key Idea](#key-idea)
+- [Architecture](#architecture)
+- [Repository Structure](#repository-structure)
+- [Getting Started](#getting-started)
+- [Implementation Flows](#implementation-flows)
+- [Verification](#verification)
+- [Results](#results)
+- [Contributions](#contributions)
+- [Citation](#citation)
+- [License](#license)
 
 ---
 
-# Repository Structure
+## Motivation
+
+FlashAttention reformulates softmax as an online recurrence that updates a running maximum, a running denominator, and a running weighted output for every incoming attention score. The exponential evaluation therefore sits directly on the critical datapath.
+
+Existing hardware implementations typically rely on hyperbolic CORDIC, polynomial approximation, or piecewise-linear approximation. All three trade area, power, or latency for accuracy, and CORDIC in particular introduces iterative refinement in a stage that is executed once per score.
+
+This work asks whether the exponential can be computed **without iteration**.
+
+## Key Idea
+
+In the online formulation the exponent is always bounded and non-positive, which permits an exact change of base:
+
+$$e^{-\delta} = 2^{-\delta \log_2 e}$$
+
+Writing the scaled exponent as an integer and fractional part, $z = k + f$, gives
+
+$$2^{-z} = 2^{-k} \cdot 2^{-f}$$
+
+| Component | Hardware |
+|---|---|
+| Integer part $2^{-k}$ | Exact barrel shift |
+| Fractional part $2^{-f}$ | 32-entry ROM lookup |
+
+No iterative refinement is required, and the decomposition is exact up to the ROM quantization of the fractional term.
+
+---
+
+## Architecture
+
+The engine is a four-stage pipeline with a BF16 input interface and FP32 internal accumulation.
+
+```
+        Input (BF16)
+             │
+        ┌────▼────┐
+        │   S0    │  Input register
+        └────┬────┘
+        ┌────▼────┐
+        │   S1    │  Comparator + BF16 delta generator
+        └────┬────┘
+        ┌────▼────┐
+        │   S2    │  Shift-LUT exponentiation
+        └────┬────┘
+        ┌────▼────┐
+        │   S3    │  Accumulator update
+        └────┬────┘
+        ┌────▼────┐
+        │ FP32    │  Divider
+        │ Divide  │
+        └────┬────┘
+             ▼
+      Softmax output
+```
+
+**Stage S2 — Shift-LUT exponentiation**
+
+1. Base-2 scaling
+2. Saturation
+3. BF16 → Q4.5 conversion
+4. Integer / fraction split
+5. ROM lookup on the fractional part
+6. Barrel-shift recombination
+
+---
+
+## Repository Structure
 
 ```
 .
 ├── rtl/
-│   ├── shift_lut_exp/
-│   ├── fp32_mac/
-│   ├── fp_div_synth/
-│   ├── accumulator_update/
-│   ├── softmax_engine_top/
-│   └── bf16_delta/
-│   └── bf16_compare/
+│   ├── bf16_compare/            # Running-maximum comparison
+│   ├── bf16_delta/              # Delta generation
+│   ├── shift_lut_exp/           # Base-2 Shift-LUT exponential unit
+│   ├── fp32_mac/                # FP32 multiply-accumulate
+│   ├── accumulator_update/      # Online recurrence update
+│   ├── fp_div_synth/            # Synthesizable FP32 divider
+│   └── softmax_engine_top/      # Top-level integration
 │
 ├── python/
-│   ├── softmax_kerenl_golden_reference/
-│   ├── evaluation/
-
+│   ├── softmax_kernel_golden_reference.py
+│   └── evaluation.py
+│
+├── fpga/                        # Vivado project and constraints
+├── asic/                        # Genus / Innovus scripts
+├── LICENSE
 └── README.md
 ```
 
 ---
 
-# Project Motivation
+## Getting Started
 
-FlashAttention reformulates softmax into an online recurrence that computes
+### Prerequisites
 
-- running maximum
-- running denominator
-- running weighted output
+| Purpose | Tool |
+|---|---|
+| Simulation | Any SystemVerilog-2012 simulator (Verilator, Questa, Xcelium) |
+| FPGA | Xilinx Vivado |
+| ASIC | Cadence Genus, Innovus, Voltus |
+| Evaluation | Python 3.8+, NumPy, PyTorch, Transformers, Datasets |
 
-for every incoming attention score.
+### Running the Python evaluation
 
-The exponential evaluation therefore becomes part of the critical datapath.
+`evaluation.py` imports `softmax_kernel_golden_reference.py`, so both files must sit in the same directory.
 
-Most existing hardware implementations rely on
-
-- Hyperbolic CORDIC
-- Polynomial approximation
-- Piecewise approximation
-
-which introduce iterative latency, larger area, and higher power.
-
-This work asks:
-
-> **Can the exponential be computed without iteration?**
-
-The answer is **yes**.
-
-Since the exponent entering FlashAttention is always bounded and non-positive,
-
-$$
-e^{-\delta} = 2^{-\delta \log_2 e}
-$$
-
-The exponent naturally separates into
-
-$$
-z = k + f
-$$
-
-allowing
-
-$$
-2^{-z} = 2^{-k} \times 2^{-f}
-$$
-
-where
-
-- **Integer component** → Barrel Shift
-- **Fractional component** → 32-entry ROM Lookup
-
-No iterative refinement is required.
-
----
-
-# Architecture
-
-The complete online-softmax pipeline consists of four stages.
-
-```
-Input
-
-↓
-
-S0
-Input Register
-
-↓
-
-S1
-Comparator
-+
-BF16 Delta Generator
-
-↓
-
-S2
-Shift-LUT Exponentiation
-
-↓
-
-S3
-Accumulator Update
-
-↓
-
-FP32 Divider
-
-↓
-
-Softmax Output
+```bash
+cd python/
+python evaluation.py       # or: python3 evaluation.py
 ```
 
-The Shift-LUT exponentiation stage performs
-
-1. Base-2 scaling
-2. Saturation
-3. BF16 → Q4.5 conversion
-4. Integer/Fraction split
-5. ROM lookup
-6. Barrel shift recombination
+This runs functional verification, error analysis, and the full accuracy sweep, and reproduces the metrics reported in the paper.
 
 ---
 
-# Key Features
+## Implementation Flows
 
-- Fully pipelined Online Softmax engine
-- BF16 input interface
-- FP32 internal accumulation
-- Exact Base-2 Shift-LUT exponentiation
-- Vendor-independent RTL
-- FPGA validated
-- ASIC synthesized
-- Python golden model
-- End-to-end GPT-2 evaluation
-- CORDIC baseline included
+### FPGA — Xilinx Spartan-7 (Vivado)
 
----
+Synthesis, implementation, timing, utilization, and power reports are included.
 
-# Repository Contents
+### ASIC — UMC 65 nm (Cadence)
 
-## RTL
+The flow covers synthesis (Genus), floorplanning, CTS, and routing (Innovus), with power analysis in Voltus. Signoff timing and power reports are included.
 
-Includes complete synthesizable SystemVerilog implementation.
-
-Modules include
-
-- bf16_compare
-- bf16_delta
-- shift_lut_exp
-- accumulator_update
-- fp32_mac
-- fp_div_synth
-- softmax_engine_top
+> The UMC 65 nm standard-cell library is not distributed with this repository. A valid foundry/PDK licence is required to rerun the ASIC flow.
 
 ---
 
-## Python
+## Verification
 
-Contains
+The design is verified at three levels of abstraction.
 
-- Golden reference implementation and evaluation which comprises:
-  - Bit-exact BF16 emulation
-  - Error analysis
-  - KL divergence evaluation
-  - GPT-2 evaluation
-  - Perplexity experiments
-  - ROM size ablation
-  - Accuracy benchmarking
+**RTL** — Module-level testbenches with randomized stimulus and ULP-tolerance checking.
+
+**Functional** — Bit-exact Python golden model compared against RTL output, with waveform validation on mismatches.
+
+**Algorithm** — GPT-2 on WikiText-2, measuring perplexity, top-1 token agreement, and KL divergence against the FP32 baseline.
 
 ---
 
-## FPGA Flow
+## Results
 
-Validated on
+All comparisons are against a functionally equivalent CORDIC-based implementation of the same pipeline.
 
-**Xilinx Spartan-7**
+### ASIC — UMC 65 nm
 
-Tools:
+| Metric | Shift-LUT | vs. CORDIC |
+|---|---|---|
+| Total area | 29,561 µm² | 27.9% smaller |
+| Exponential unit area | 671 µm² | 18.7× smaller |
+| Total power | 4.24 mW | 24.8% lower |
+| F<sub>max</sub> | 154.5 MHz | Comparable |
 
-- Vivado
+### FPGA — Spartan-7
 
-Includes
+| Metric | Shift-LUT | vs. CORDIC |
+|---|---|---|
+| LUTs | 2,050 | 22.8% fewer |
+| Exponential unit LUTs | 56 | 13.2× fewer |
+| Dynamic power | 69 mW | 10.3% lower |
+| F<sub>max</sub> | 107.64 MHz | 6.4% higher |
 
-- synthesis
-- implementation
-- timing reports
-- utilization
-- power reports
+### Numerical accuracy
 
----
-
-## ASIC Flow
-
-Validated using
-
-- UMC 65nm Standard Cell Library
-
-EDA tools
-
-- Cadence Genus
-- Cadence Innovus
-- Voltus
-
-Includes
-
-- synthesis scripts
-- floorplanning
-- CTS
-- routing
-- power reports
-- timing reports
-
----
-
-# Verification
-
-The design was verified at multiple abstraction levels.
-
-### RTL Verification
-
-- Module-level testbenches
-- Randomized stimulus
-- ULP tolerance checking
-
-### Functional Verification
-
-Python golden model
-
-↓
-
-RTL comparison
-
-↓
-
-Waveform validation
-
-### Algorithm-Level Validation
-
-GPT-2
-
-↓
-
-WikiText-2
-
-↓
-
-Perplexity
-
-↓
-
-Top-1 Agreement
-
-↓
-
-KL Divergence
-
----
-
-# Experimental Results
-
-## ASIC (65nm UMC)
-
-| Metric | Shift-LUT | Improvement |
-|----------|------------|----------------|
-| Total Area | 29,561 µm² | **27.9% smaller** |
-| Exponential Unit | 671 µm² | **18.7× smaller** |
-| Total Power | 4.24 mW | **24.8% lower** |
-| Fmax | 154.5 MHz | Comparable to CORDIC |
-
----
-
-## FPGA (Spartan-7)
-
-| Metric | Shift-LUT | Improvement |
-|----------|------------|----------------|
-| LUTs | 2050 | 22.8% fewer |
-| Exponential LUTs | 56 | 13.2× fewer |
-| Dynamic Power | 69 mW | 10.3% lower |
-| Frequency | 107.64 MHz | 6.4% higher |
-
----
-
-# Numerical Accuracy
-
-Compared against FP32 baseline
+Relative to an FP32 baseline:
 
 - Mean relative error ≈ 0.8%
 - Maximum relative error ≈ 1.5%
@@ -325,58 +201,30 @@ Compared against FP32 baseline
 
 ---
 
-# Novel Contributions
+## Contributions
 
-This work demonstrates that
-
-- FlashAttention's exponent range is fundamentally bounded.
-- Iterative exponentiation is therefore unnecessary.
-- Exact Base-2 decomposition enables a hardware-friendly implementation.
-- ROM lookup + barrel shift replace iterative CORDIC without sacrificing model accuracy.
-- The resulting design significantly improves area and power while preserving numerical behavior.
+1. The exponent range in FlashAttention's online softmax is fundamentally bounded, which removes the need for a general-purpose exponential unit.
+2. Exact Base-2 decomposition maps the exponential onto a small ROM and a barrel shift.
+3. The resulting unit is an order of magnitude smaller than a CORDIC exponential at equivalent pipeline throughput.
+4. Model-level accuracy is preserved end to end on GPT-2 / WikiText-2.
+5. The full flow is released from RTL through FPGA and ASIC signoff.
 
 ---
 
-## Running the Python Evaluation
+## Citation
 
-The Python evaluation consists of two files:
-
-- `softmax_kernel_golden_reference.py` – Implements the bit-exact golden reference model of the online softmax engine.
-- `evaluation.py` – Runs functional verification, accuracy evaluation, and generates the reported metrics.
-
-### Directory Structure
-
-Ensure both files are placed in the **same directory**:
-
+```bibtex
+@inproceedings{shiftlut_softmax,
+  title     = {A Hardware-Efficient Online Softmax Engine for FlashAttention
+               using Base-2 Shift-LUT Exponentiation},
+  author    = {},
+  booktitle = {},
+  year      = {}
+}
 ```
-python/
-├── evaluation.py
-└── softmax_kernel_golden_reference.py
-```
-
-### Running
-
-From within the `python/` directory, execute:
-
-```bash
-python evaluation.py
-```
-
-or, depending on your Python installation,
-
-```bash
-python3 evaluation.py
-```
-
-The script automatically imports `softmax_kernel_golden_reference.py` and performs the complete evaluation workflow.
 
 ---
 
-# License
+## License
 
-This repository is released under the MIT License.
-
----
-
-
-
+Released under the MIT License. See [LICENSE](LICENSE) for the full text.
